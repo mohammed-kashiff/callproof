@@ -173,8 +173,6 @@ def call_claude(prompt):
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
                 json={"model": MODEL, "max_tokens": MAX_TOKENS,
-                      "thinking": {"type": "disabled"},
-                      "output_config": {"effort": "low"},
                       "messages": [{"role": "user", "content": prompt}]},
                 timeout=60,
             )
