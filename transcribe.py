@@ -1,8 +1,8 @@
 """
-CallProof - transcript spine (with logging).
+CallProof - transcript spine (PocketBase-backed, with logging).
 
 Submit a local audio file (or public URL) to PyAI Hear, poll until done, and
-save a speaker-labelled, timestamped transcript to SQLite. Each source is
+save a speaker-labelled, timestamped transcript via PocketBase. Each source is
 transcribed once (cached by content hash). On a failed job, PyAI's actual error
 is logged and raised - no more silent failures.
 """
@@ -10,13 +10,13 @@ is logged and raised - no more silent failures.
 import os
 import sys
 import time
-import json
 import logging
-import sqlite3
 import hashlib
 
 import httpx
 from dotenv import load_dotenv
+
+import db
 
 load_dotenv()
 
@@ -29,7 +29,6 @@ log = logging.getLogger("callproof.transcribe")
 
 PYAI_API_KEY = os.getenv("PYAI_API_KEY")
 BASE_URL = "https://api.pyai.com"
-DB_PATH = "callproof.db"
 
 AUDIO_SOURCE = "/Users/mohammed.kashif/Downloads/test1.mp3"   # only used by the CLI main()
 SEPARATION_MODE = "diarize"    # "diarize" (mono or stereo) | "channel" (true dual-channel)
@@ -38,52 +37,31 @@ MODEL = "pyai-hear-telephony"
 POLL_INTERVAL_SECONDS = 2
 POLL_MAX_ATTEMPTS = 60
 
-if not PYAI_API_KEY:
-    sys.exit("ERROR: PYAI_API_KEY not found. Is .env in this folder?")
 
-HEADERS = {"Authorization": f"Bearer {PYAI_API_KEY}"}
+def _headers():
+    if not PYAI_API_KEY:
+        raise RuntimeError("PYAI_API_KEY not found. Is .env in this folder?")
+    return {"Authorization": f"Bearer {PYAI_API_KEY}"}
 
 
 def is_url(src):
     return src.startswith("http://") or src.startswith("https://")
 
 
-# ---------- Database ----------
+# ---------- Database (compat wrappers) ----------
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS calls (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, audio_url TEXT UNIQUE NOT NULL,
-        job_id TEXT, status TEXT, full_text TEXT, speakers INTEGER,
-        audio_seconds REAL, raw_json TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS segments (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, call_id INTEGER NOT NULL,
-        seq INTEGER, speaker TEXT, channel INTEGER, start REAL, end REAL, text TEXT)""")
-    conn.commit()
-    return conn
+    db.init_db()
+    return db
 
 
-def find_existing_call(conn, identity):
-    return conn.execute(
-        "SELECT id FROM calls WHERE audio_url = ? AND status = 'completed'", (identity,)).fetchone()
+def find_existing_call(_conn, identity):
+    """Returns (call_id,) tuple or None — matches old sqlite Row shape for callers."""
+    call_id = db.find_existing_call(identity)
+    return (call_id,) if call_id else None
 
 
-def save_transcript(conn, identity, job_id, result):
-    segments = result.get("segments") or []
-    cur = conn.execute(
-        """INSERT INTO calls (audio_url, job_id, status, full_text, speakers, audio_seconds, raw_json)
-           VALUES (?, ?, 'completed', ?, ?, ?, ?)""",
-        (identity, job_id, result.get("text", ""), result.get("speakers"),
-         result.get("audio_seconds"), json.dumps(result)))
-    call_id = cur.lastrowid
-    for i, seg in enumerate(segments):
-        conn.execute(
-            """INSERT INTO segments (call_id, seq, speaker, channel, start, end, text)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (call_id, i, seg.get("speaker"), seg.get("channel"),
-             seg.get("start"), seg.get("end"), seg.get("text")))
-    conn.commit()
-    log.info("saved transcript for call %d (%d segments)", call_id, len(segments))
-    return call_id
+def save_transcript(_conn, identity, job_id, result):
+    return db.save_transcript(identity, job_id, result)
 
 
 # ---------- PyAI service wrapper ----------
@@ -92,7 +70,7 @@ def submit_job_url(audio_url):
     body.update({"channel": True} if SEPARATION_MODE == "channel" else {"diarize": True})
     idem = hashlib.sha256(audio_url.encode()).hexdigest()[:32]
     resp = httpx.post(f"{BASE_URL}/v1/transcription/jobs", json=body,
-                      headers={**HEADERS, "Idempotency-Key": idem}, timeout=60)
+                      headers={**_headers(), "Idempotency-Key": idem}, timeout=60)
     return _job_id_from(resp)
 
 
@@ -104,7 +82,7 @@ def submit_job_file(path):
     data.update({"channel": "true"} if SEPARATION_MODE == "channel" else {"diarize": "true"})
     log.info("submitting %.2f MB to PyAI Hear (%s mode)", len(audio_bytes) / 1_000_000, SEPARATION_MODE)
     resp = httpx.post(f"{BASE_URL}/v1/transcription/jobs",
-                      files=files, data=data, headers=HEADERS, timeout=120)
+                      files=files, data=data, headers=_headers(), timeout=120)
     return _job_id_from(resp)
 
 
@@ -122,7 +100,7 @@ def _job_id_from(resp):
 def poll_job(job_id):
     last_status = None
     for attempt in range(1, POLL_MAX_ATTEMPTS + 1):
-        resp = httpx.get(f"{BASE_URL}/v1/transcription/jobs/{job_id}", headers=HEADERS, timeout=30)
+        resp = httpx.get(f"{BASE_URL}/v1/transcription/jobs/{job_id}", headers=_headers(), timeout=30)
         if resp.status_code != 200:
             log.error("poll error: %s %s", resp.status_code, resp.text[:300])
             raise RuntimeError(f"PyAI poll error: {resp.status_code} {resp.text}")
@@ -162,18 +140,18 @@ def identity_for(src):
 
 def main():
     src = AUDIO_SOURCE
-    conn = init_db()
+    db.init_db()
     if not is_url(src) and not os.path.isfile(src):
         sys.exit(f"ERROR: file not found: {src}")
     identity = identity_for(src)
-    existing = find_existing_call(conn, identity)
+    existing = db.find_existing_call(identity)
     if existing:
-        log.info("already transcribed (call id %d) - loading from DB, no API call", existing[0])
+        log.info("already transcribed (call id %s) - loading from DB, no API call", existing)
         return
     job_id = submit_job_url(src) if is_url(src) else submit_job_file(src)
     result = poll_job(job_id)
-    call_id = save_transcript(conn, identity, job_id, result)
-    log.info("done: call id %d", call_id)
+    call_id = db.save_transcript(identity, job_id, result)
+    log.info("done: call id %s", call_id)
 
 
 if __name__ == "__main__":

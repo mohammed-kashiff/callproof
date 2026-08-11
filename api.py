@@ -1,5 +1,5 @@
 """
-CallProof - FastAPI backend (v3, with logging).
+CallProof - FastAPI backend (v3, PocketBase-backed).
 
 Every request logs what it does. Crucially, /audit logs whether it served from
 CACHE (stable score) or recomputed (MISS) - so you can see, per request, why a
@@ -10,12 +10,12 @@ import os
 import json
 import hashlib
 import logging
-import sqlite3
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
+import db
 import qa_engine as qa
 import transcribe
 
@@ -26,7 +26,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("callproof.api")
 
-DB_PATH = qa.DB_PATH
 AUDIO_DIR = "audio"
 
 app = FastAPI(title="CallProof API")
@@ -39,23 +38,14 @@ app.add_middleware(
 )
 
 
-def _conn():
-    c = sqlite3.connect(DB_PATH)
-    c.row_factory = sqlite3.Row
-    return c
-
-
 def _startup():
-    transcribe.init_db().close()
-    with _conn() as c:
-        c.execute("CREATE TABLE IF NOT EXISTS audits ("
-                  "call_id INTEGER PRIMARY KEY, audit_json TEXT, "
-                  "rubric_hash TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)")
-        cols = [r[1] for r in c.execute("PRAGMA table_info(audits)").fetchall()]
-        if "rubric_hash" not in cols:
-            c.execute("ALTER TABLE audits ADD COLUMN rubric_hash TEXT")
+    try:
+        db.init_db()
+    except Exception as e:  # noqa: BLE001
+        log.error("PocketBase unavailable at startup: %s", e)
+        raise
     os.makedirs(AUDIO_DIR, exist_ok=True)
-    log.info("startup complete; db=%s", DB_PATH)
+    log.info("startup complete; pocketbase=%s", db.POCKETBASE_URL)
 
 
 _startup()
@@ -67,10 +57,7 @@ def _rubric_hash():
 
 
 def analyze_call(call_id, agent_override=None):
-    with _conn() as c:
-        exists = c.execute(
-            "SELECT 1 FROM calls WHERE id=? AND status='completed'", (call_id,)).fetchone()
-    if not exists:
+    if not db.call_completed(call_id):
         raise HTTPException(status_code=404, detail=f"No completed call with id {call_id}")
 
     call_id, meta, segments = qa.load_call(call_id)
@@ -82,7 +69,7 @@ def analyze_call(call_id, agent_override=None):
     with open(qa.RUBRIC_PATH) as f:
         rubric = json.load(f)
 
-    log.info("computing audit for call %d (%d criteria)", call_id, len(rubric["criteria"]))
+    log.info("computing audit for call %s (%d criteria)", call_id, len(rubric["criteria"]))
     results = [(cr, qa.evaluate_criterion(cr, segments, agent, transcript_text))
                for cr in rubric["criteria"]]
 
@@ -111,35 +98,32 @@ def analyze_call(call_id, agent_override=None):
 
 @app.get("/api/calls")
 def list_calls():
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT id, audio_seconds, speakers FROM calls "
-            "WHERE status='completed' ORDER BY id DESC").fetchall()
-    return [dict(r) for r in rows]
+    return db.list_completed_calls()
 
 
 @app.get("/api/calls/{call_id}/audit")
-def get_audit(call_id: int, refresh: bool = False):
+def get_audit(call_id: str, refresh: bool = False):
     rh = _rubric_hash()
     if not refresh:
-        with _conn() as c:
-            row = c.execute(
-                "SELECT audit_json, rubric_hash FROM audits WHERE call_id=?", (call_id,)).fetchone()
+        row = db.get_audit(call_id)
         if row and row["rubric_hash"] == rh:
-            cached = json.loads(row["audit_json"])
-            log.info("cache HIT  call %d (score %s) - returning stored audit", call_id, cached.get("score"))
+            cached = row["audit_json"]
+            log.info("cache HIT  call %s (score %s) - returning stored audit",
+                     call_id, cached.get("score"))
             return cached
-    log.info("cache %s call %d - computing fresh audit", "BYPASS (refresh)" if refresh else "MISS ", call_id)
+    log.info("cache %s call %s - computing fresh audit",
+             "BYPASS (refresh)" if refresh else "MISS ", call_id)
     audit = analyze_call(call_id)
-    with _conn() as c:
-        c.execute("INSERT OR REPLACE INTO audits (call_id, audit_json, rubric_hash) VALUES (?, ?, ?)",
-                  (call_id, json.dumps(audit), rh))
-    log.info("cached audit for call %d (score %s)", call_id, audit["score"])
+    db.upsert_audit(call_id, audit, rh)
+    log.info("cached audit for call %s (score %s)", call_id, audit["score"])
     return audit
 
 
 @app.get("/api/calls/{call_id}/audio")
-def get_audio(call_id: int):
+def get_audio(call_id: str):
+    # Prevent path traversal — call ids are PocketBase record ids (alphanumeric).
+    if not call_id.isalnum():
+        raise HTTPException(status_code=400, detail="Invalid call id")
     path = os.path.join(AUDIO_DIR, f"{call_id}.mp3")
     if not os.path.isfile(path):
         raise HTTPException(status_code=404,
@@ -161,17 +145,15 @@ def upload(file: UploadFile = File(...)):
 
     try:
         identity = transcribe.identity_for(tmp)
-        conn = sqlite3.connect(DB_PATH)
-        existing = transcribe.find_existing_call(conn, identity)
+        existing = db.find_existing_call(identity)
         if existing:
-            call_id = existing[0]
-            log.info("upload deduped to existing call %d (no re-transcription)", call_id)
+            call_id = existing
+            log.info("upload deduped to existing call %s (no re-transcription)", call_id)
         else:
             job_id = transcribe.submit_job_file(tmp)
             result = transcribe.poll_job(job_id)
-            call_id = transcribe.save_transcript(conn, identity, job_id, result)
-            log.info("transcription complete -> new call %d", call_id)
-        conn.close()
+            call_id = db.save_transcript(identity, job_id, result)
+            log.info("transcription complete -> new call %s", call_id)
         os.replace(tmp, os.path.join(AUDIO_DIR, f"{call_id}.mp3"))
     except HTTPException:
         raise

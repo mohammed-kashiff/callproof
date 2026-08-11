@@ -122,7 +122,7 @@ export default function App() {
           <select
             className="call-select"
             value={callId ?? ""}
-            onChange={(e) => setCallId(Number(e.target.value))}
+            onChange={(e) => setCallId(e.target.value)}
           >
             {calls.map((c) => (
               <option key={c.id} value={c.id}>

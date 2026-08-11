@@ -10,6 +10,11 @@ __pycache__/
 callproof.db
 audio/
 
+# PocketBase binary + local data
+pocketbase/pocketbase
+pocketbase/pb_data/
+pocketbase/*.zip
+
 # node / frontend build
 node_modules/
 frontend/node_modules/

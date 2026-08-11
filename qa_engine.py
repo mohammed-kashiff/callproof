@@ -19,11 +19,11 @@ import sys
 import json
 import time
 import logging
-import sqlite3
 
 import httpx
 from dotenv import load_dotenv
 
+import db
 import rules
 
 load_dotenv()
@@ -36,7 +36,6 @@ logging.basicConfig(
 log = logging.getLogger("callproof.qa")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-DB_PATH = "callproof.db"
 RUBRIC_PATH = "rubric.json"
 MODEL = "claude-sonnet-5"
 MAX_HTTP_RETRIES = 4       # attempts per Claude call (with backoff)
@@ -46,23 +45,10 @@ MAX_TOKENS = 2000
 
 # ---------- Load transcript ----------
 def load_call(call_id=None):
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    if call_id is None:
-        row = conn.execute(
-            "SELECT id FROM calls WHERE status='completed' ORDER BY id DESC LIMIT 1").fetchone()
-        if not row:
-            sys.exit("No completed calls in the database. Run transcribe.py first.")
-        call_id = row["id"]
-    meta = conn.execute(
-        "SELECT id, full_text, speakers, audio_seconds FROM calls WHERE id=?", (call_id,)).fetchone()
-    if not meta:
-        sys.exit(f"No call with id {call_id} in the database.")
-    segs = conn.execute(
-        "SELECT seq, speaker, channel, start, end, text FROM segments WHERE call_id=? ORDER BY seq",
-        (call_id,)).fetchall()
-    conn.close()
-    return call_id, dict(meta), [dict(s) for s in segs]
+    try:
+        return db.load_call(call_id)
+    except Exception as e:  # noqa: BLE001
+        sys.exit(str(e))
 
 
 def identify_agent(segments):
@@ -373,7 +359,7 @@ LABEL = {"pass": "PASS", "partial": "PARTIAL", "fail": "FAIL",
 def main():
     if not ANTHROPIC_API_KEY:
         sys.exit("ERROR: ANTHROPIC_API_KEY not found in .env")
-    arg_id = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else None
+    arg_id = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else None
     agent_override = sys.argv[2] if len(sys.argv) > 2 else None
 
     call_id, meta, segments = load_call(arg_id)
