@@ -408,7 +408,7 @@ def analyze_call(call_id, agent_override=None):
         "segments": segments, "findings": findings,
         "coaching": [],
         "churn": churn, "feedback": feedback,
-        "retention_email": retention_email, "recap": call_recap,
+        "retention_email": None, "recap": call_recap,
     }
 
 
@@ -595,8 +595,8 @@ def post_coaching(call_id: int):
     return {"call_id": call_id, "coaching": coaching}
 
 
-@app.get("/api/calls/{call_id}/stakeholder-email/compose")
-def get_stakeholder_email_compose(call_id: int):
+@app.post("/api/calls/{call_id}/stakeholder-email/compose")
+def post_stakeholder_email_compose(call_id: int):
     """
     Prefill a Gmail compose draft for this call's churn alert.
     Drafts the retention email with Claude on first use, then caches it.

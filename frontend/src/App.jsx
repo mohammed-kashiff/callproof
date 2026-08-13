@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, Fragment } from "react";
 import "./App.css";
 
-const API = "http://localhost:8000";
+const API = "http://127.0.0.1:8000";
 const MAX_UPLOAD_MB = 25;
 const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024;
 const MAX_BULK_FILES = 5;
@@ -106,8 +106,8 @@ function JobProgress({ active, phase, fromUpload }) {
         : "Working…";
   const hint =
     phase === "transcribe"
-      ? "Usually 20–40 seconds."
-      : "Rubric, churn, feedback, and draft email run together.";
+      ? "Uploading audio and waiting on PyAI Hear (often 20–40s)."
+      : "Running rubric, churn, and feedback in parallel.";
 
   return (
     <div className="job-progress" aria-live="polite">
@@ -360,6 +360,8 @@ export default function App() {
 
   async function loadCoaching() {
     if (callId == null || coachingLoading) return;
+    // One generation per call — hide button after tips exist; block repeat calls too.
+    if ((audit?.coaching ?? []).length > 0) return;
     setCoachingLoading(true);
     setCoachingError(null);
     try {
@@ -385,6 +387,7 @@ export default function App() {
     try {
       const r = await fetch(
         `${API}/api/calls/${callId}/stakeholder-email/compose`,
+        { method: "POST" },
       );
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -395,6 +398,11 @@ export default function App() {
         throw new Error(detail);
       }
       if (!d.gmail_url) throw new Error("Missing Gmail compose link.");
+      if (d.retention_email) {
+        setAudit((prev) =>
+          prev ? { ...prev, retention_email: d.retention_email } : prev,
+        );
+      }
       const win = window.open(d.gmail_url, "_blank", "noopener,noreferrer");
       if (!win) {
         throw new Error(
@@ -449,8 +457,6 @@ export default function App() {
   const callRecap = audit?.recap ?? null;
   const recapStatus = callRecap?.status ?? null;
   const recapItems = callRecap?.action_items ?? [];
-  const retentionEmail = audit?.retention_email ?? null;
-  const retentionReady = retentionEmail?.status === "ok" && !!retentionEmail?.body;
 
   const coaching = audit?.coaching ?? [];
   const weakCount =
@@ -533,8 +539,6 @@ export default function App() {
                         ? "Drafting email…"
                         : "Email stakeholder"}
                     </button>
-                    {retentionReady && emailStatus !== "error" && (
-                      <span className="churn-queued">Draft ready</span>
                     )}
                     {emailStatus === "opened" && emailMessage && (
                       <span className="churn-queued">{emailMessage}</span>
@@ -663,17 +667,13 @@ export default function App() {
             <section className="coaching-block">
               <div className="coaching-head">
                 <h2 className="h">Coaching</h2>
-                {weakCount > 0 && (
+                {weakCount > 0 && coaching.length === 0 && (
                   <button
                     className="coach-btn"
                     onClick={loadCoaching}
                     disabled={coachingLoading}
                   >
-                    {coachingLoading
-                      ? "Generating…"
-                      : coaching.length > 0
-                        ? "Refresh tips"
-                        : "Get tips"}
+                    {coachingLoading ? "Generating…" : "Get tips"}
                   </button>
                 )}
               </div>
