@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import sys
+import re
 import time
 import json
 import logging
@@ -47,6 +48,12 @@ MODEL = "pyai-hear-telephony"
 
 POLL_INTERVAL_SECONDS = 2
 POLL_MAX_ATTEMPTS = 60
+HEAR_JOB_RETRIES = 3
+_TRANSIENT_HEAR = re.compile(
+    r"HTTP 502|HTTP 503|HTTP 504|no healthy upstream|upstream request timeout|"
+    r"upstream connect error|remote connection failure",
+    re.I,
+)
 
 # Telephony-sized copy for PyAI Hear only. Playback still uses the original file.
 # Must stay discrete-channel PCM (not MP3). Joint-stereo MP3 mixes L/R, and
@@ -517,6 +524,38 @@ def poll_job(job_id):
     )
 
 
+def is_transient_hear_error(exc: BaseException) -> bool:
+    return bool(_TRANSIENT_HEAR.search(str(exc)))
+
+
+def run_hear_job(path, call_id=None, retries=HEAR_JOB_RETRIES):
+    """Submit + poll. Resubmit on PyAI STT 502/503/504 upstream failures."""
+    last_err: BaseException | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            job_id = submit_job_file(path, call_id=call_id)
+            result = poll_job(job_id)
+            return job_id, result
+        except (RuntimeError, httpx.HTTPError) as e:
+            last_err = e
+            if attempt >= retries or not is_transient_hear_error(e):
+                raise
+            wait = min(8, 2 * attempt)
+            applog.event(
+                log, "transcription_retry",
+                attempt=attempt,
+                retries=retries,
+                wait_s=wait,
+                error=str(e)[:300],
+            )
+            log.warning(
+                "transient Hear error on attempt %d/%d: %s; retrying in %ds",
+                attempt, retries, e, wait,
+            )
+            time.sleep(wait)
+    raise last_err  # pragma: no cover
+
+
 def get_result(job_data):
     if job_data.get("result"):
         return job_data["result"]
@@ -552,11 +591,11 @@ def main():
     try:
         if is_url(src):
             job_id = submit_job_url(src, call_id=pyai_id)
+            result = poll_job(job_id)
         else:
             hear_tmp = src + ".hear-tmp.wav"
             upload_path = make_hear_copy(src, hear_tmp) or src
-            job_id = submit_job_file(upload_path, call_id=pyai_id)
-        result = poll_job(job_id)
+            job_id, result = run_hear_job(upload_path, call_id=pyai_id)
         call_id = save_transcript(
             conn, identity, job_id, result,
             pyai_call_id=pyai_id,
