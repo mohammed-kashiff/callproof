@@ -281,6 +281,7 @@ PYAI_API_KEY=pyai_live_your_key_here
 | `callproof.db` | Calls, segments, audits, usage |
 | `audio/` | Playback copies |
 | `rubric_v8.json` / `rules_v8.py` | Scoring rubric |
+| `docs/qa-engine-overview.md` | Presentation guide: pipeline, APIs, models, scoring, hybrid |
 
 ---
 
