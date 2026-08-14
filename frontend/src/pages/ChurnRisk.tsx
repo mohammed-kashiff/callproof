@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { CallPicker } from '../components/CallPicker'
 import { ChurnCue } from '../components/LoopCues'
 import { SketchWallpaper } from '../components/SketchWallpaper'
 import { KpiCard } from '../components/KpiCard'
 import { Workspace, callNoteScopeKey } from '../components/Workspace'
 import { capFirst, capWords, formatTime } from '../lib/format'
+import { API, readError } from '../lib/api'
 import { useAudit } from '../context/AuditContext'
 import type { ChurnLevel } from '../types'
 
@@ -16,11 +17,18 @@ const LEVELS: { level: ChurnLevel; label: string; hint: string }[] = [
   { level: 'high', label: 'High', hint: 'Imminent cancel / escalate language' },
 ]
 
+const MARKED_CHURN = new Set<ChurnLevel>(['low', 'medium', 'high'])
+
+function isMarkedChurnRisk(risk: string | null | undefined): boolean {
+  return MARKED_CHURN.has(String(risk || '').toLowerCase() as ChurnLevel)
+}
+
 export function ChurnRisk() {
   const navigate = useNavigate()
   const { report, showReport, calls, selectCall, running, onSeek } = useAudit()
   const { churn } = report
   const [switching, setSwitching] = useState(false)
+  const [emailing, setEmailing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const callLabel = capFirst(report.fileName || report.callId || 'Current call')
@@ -28,11 +36,12 @@ export function ChurnRisk() {
   const callIdLabel =
     report.numericCallId != null ? `Call #${report.numericCallId}` : report.callId || ''
 
-  const auditedCalls = useMemo(
-    () =>
-      calls.filter((c) => c.has_audit || c.status === 'completed' || !c.status),
+  const churnRiskCalls = useMemo(
+    () => calls.filter((c) => isMarkedChurnRisk(c.churn_risk)),
     [calls],
   )
+  const viewingChurn = showReport && isMarkedChurnRisk(churn.level)
+  const canEmailStakeholder = churn.level === 'medium' || churn.level === 'high'
 
   const onPickCall = (id: number) => {
     if (id === report.numericCallId) return
@@ -45,10 +54,37 @@ export function ChurnRisk() {
       .finally(() => setSwitching(false))
   }
 
+  const sendStakeholderEmail = () => {
+    const id = report.numericCallId
+    if (id == null || emailing || !canEmailStakeholder) return
+    setError(null)
+    setEmailing(true)
+    void (async () => {
+      try {
+        const r = await fetch(`${API}/api/calls/${id}/stakeholder-email/compose`)
+        if (!r.ok) {
+          throw new Error(await readError(r, 'Could not draft the stakeholder email.'))
+        }
+        const data = (await r.json()) as { gmail_url?: string }
+        const url = (data.gmail_url || '').trim()
+        if (!url.startsWith('https://mail.google.com/')) {
+          throw new Error('Could not open the stakeholder email draft.')
+        }
+        window.open(url, '_blank', 'noopener,noreferrer')
+      } catch (e: unknown) {
+        setError(
+          e instanceof Error ? e.message : 'Could not draft the stakeholder email.',
+        )
+      } finally {
+        setEmailing(false)
+      }
+    })()
+  }
+
   const callPicker =
-    auditedCalls.length > 0 ? (
+    churnRiskCalls.length > 0 ? (
       <CallPicker
-        calls={auditedCalls}
+        calls={churnRiskCalls}
         value={report.numericCallId}
         disabled={running || switching}
         onChange={onPickCall}
@@ -62,7 +98,7 @@ export function ChurnRisk() {
           <p className="crumb">Loop / Retention</p>
           <h1>Churn Risk</h1>
         </div>
-        {!showReport ? callPicker : null}
+        {!viewingChurn ? callPicker : null}
       </header>
 
       {error && (
@@ -71,20 +107,20 @@ export function ChurnRisk() {
         </p>
       )}
 
-      {!showReport && (
+      {!viewingChurn && (
         <div className="empty-card is-pulse">
           <SketchWallpaper variant="churn" />
           <ChurnCue />
           <p className="empty-title">No churn language yet</p>
           <p className="empty-copy">
-            {auditedCalls.length
+            {churnRiskCalls.length
               ? 'Pick a call above to score retention risk.'
               : 'Ingest a recording to score retention risk before renewal.'}
           </p>
         </div>
       )}
 
-      {showReport && (
+      {viewingChurn && (
         <>
           <div className="call-context-banner" role="status">
             <div className="call-context-copy">
@@ -100,18 +136,39 @@ export function ChurnRisk() {
               {callPicker}
             </div>
             <div className="call-context-actions">
-              <Link to="/agents-pulse" className="ghost-btn call-context-link">
-                Open in Agent Pulse
-              </Link>
+              <button
+                type="button"
+                className="ghost-btn call-context-link"
+                disabled={running || switching || emailing || !canEmailStakeholder}
+                title={
+                  canEmailStakeholder
+                    ? 'Open a Gmail draft for this churn alert'
+                    : 'Stakeholder email is available for medium and high churn risk'
+                }
+                onClick={sendStakeholderEmail}
+              >
+                {emailing ? 'Drafting email…' : 'Send an email to stakeholder'}
+              </button>
             </div>
           </div>
+
+          <section className="churn-reason-box" aria-label="Why this call was flagged">
+            <p className="churn-reason-kicker">Why this was flagged</p>
+            <p className="churn-reason-body">
+              {capFirst(churn.reasoning) ||
+                'No churn reasoning was recorded for this call.'}
+            </p>
+          </section>
 
           <div className="kpi-strip">
             <KpiCard
               label="Rating"
               value={capFirst(churn.level)}
               hint="From The Driving Quote"
-              tone={churn.level === 'high' || churn.level === 'medium' ? 'warn' : 'good'}
+              tone={
+                churn.level === 'high' ? 'bad' : churn.level === 'medium' ? 'warn' : 'good'
+              }
+              fill
             />
             <KpiCard
               label="Agent"

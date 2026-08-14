@@ -131,6 +131,7 @@ export interface CallListItem {
   grade: string | null
   flagged: boolean
   review_solved: boolean
+  churn_risk?: string | null
   cost?: { total_usd?: number } | null
 }
 

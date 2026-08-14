@@ -630,6 +630,32 @@ html[data-color-mode='dark'] .brand-motion.is-hero {
   color: var(--fail);
 }
 
+.kpi-card.is-fill {
+  border-color: transparent;
+}
+
+.kpi-card.is-fill .kpi-label,
+.kpi-card.is-fill .kpi-value,
+.kpi-card.is-fill .kpi-hint {
+  color: #fff;
+}
+
+.kpi-card.is-fill .kpi-hint {
+  opacity: 0.88;
+}
+
+.kpi-card.is-fill.tone-good {
+  background: var(--pass);
+}
+
+.kpi-card.is-fill.tone-warn {
+  background: var(--partial);
+}
+
+.kpi-card.is-fill.tone-bad {
+  background: var(--fail);
+}
+
 .empty-card {
   background: var(--card);
   border: 1px solid var(--line);
