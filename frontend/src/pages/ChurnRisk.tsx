@@ -165,7 +165,10 @@ export function ChurnRisk() {
               label="Rating"
               value={capFirst(churn.level)}
               hint="From The Driving Quote"
-              tone={churn.level === 'high' || churn.level === 'medium' ? 'warn' : 'good'}
+              tone={
+                churn.level === 'high' ? 'bad' : churn.level === 'medium' ? 'warn' : 'good'
+              }
+              fill
             />
             <KpiCard
               label="Agent"

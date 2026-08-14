@@ -215,23 +215,23 @@
 }
 
 .call-picker-chip.is-churn-high {
-  background: rgba(239, 68, 68, 0.16);
-  color: #f87171;
+  background: var(--fail);
+  color: #fff;
 }
 
 .call-picker-chip.is-churn-medium {
-  background: rgba(217, 119, 6, 0.18);
-  color: #f59e0b;
+  background: var(--partial);
+  color: #fff;
 }
 
 .call-picker-chip.is-churn-low {
-  background: rgba(20, 184, 166, 0.18);
-  color: var(--teal);
+  background: var(--pass);
+  color: #fff;
 }
 
 .call-picker-chip.is-churn-none {
-  background: rgba(148, 163, 184, 0.18);
-  color: var(--ink-soft);
+  background: var(--na);
+  color: #fff;
 }
 
 .call-context-actions {
