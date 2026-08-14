@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { CallPicker } from '../components/CallPicker'
 import { ChurnCue } from '../components/LoopCues'
 import { SketchWallpaper } from '../components/SketchWallpaper'
 import { KpiCard } from '../components/KpiCard'
 import { Workspace, callNoteScopeKey } from '../components/Workspace'
 import { capFirst, capWords, formatTime } from '../lib/format'
+import { API, readError } from '../lib/api'
 import { useAudit } from '../context/AuditContext'
 import type { ChurnLevel } from '../types'
 
@@ -27,6 +28,7 @@ export function ChurnRisk() {
   const { report, showReport, calls, selectCall, running, onSeek } = useAudit()
   const { churn } = report
   const [switching, setSwitching] = useState(false)
+  const [emailing, setEmailing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const callLabel = capFirst(report.fileName || report.callId || 'Current call')
@@ -39,6 +41,7 @@ export function ChurnRisk() {
     [calls],
   )
   const viewingChurn = showReport && isMarkedChurnRisk(churn.level)
+  const canEmailStakeholder = churn.level === 'medium' || churn.level === 'high'
 
   const onPickCall = (id: number) => {
     if (id === report.numericCallId) return
@@ -49,6 +52,33 @@ export function ChurnRisk() {
         setError(e instanceof Error ? e.message : 'Could not open that call.'),
       )
       .finally(() => setSwitching(false))
+  }
+
+  const sendStakeholderEmail = () => {
+    const id = report.numericCallId
+    if (id == null || emailing || !canEmailStakeholder) return
+    setError(null)
+    setEmailing(true)
+    void (async () => {
+      try {
+        const r = await fetch(`${API}/api/calls/${id}/stakeholder-email/compose`)
+        if (!r.ok) {
+          throw new Error(await readError(r, 'Could not draft the stakeholder email.'))
+        }
+        const data = (await r.json()) as { gmail_url?: string }
+        const url = (data.gmail_url || '').trim()
+        if (!url.startsWith('https://mail.google.com/')) {
+          throw new Error('Could not open the stakeholder email draft.')
+        }
+        window.open(url, '_blank', 'noopener,noreferrer')
+      } catch (e: unknown) {
+        setError(
+          e instanceof Error ? e.message : 'Could not draft the stakeholder email.',
+        )
+      } finally {
+        setEmailing(false)
+      }
+    })()
   }
 
   const callPicker =
@@ -106,9 +136,19 @@ export function ChurnRisk() {
               {callPicker}
             </div>
             <div className="call-context-actions">
-              <Link to="/agents-pulse" className="ghost-btn call-context-link">
-                Open in Agent Pulse
-              </Link>
+              <button
+                type="button"
+                className="ghost-btn call-context-link"
+                disabled={running || switching || emailing || !canEmailStakeholder}
+                title={
+                  canEmailStakeholder
+                    ? 'Open a Gmail draft for this churn alert'
+                    : 'Stakeholder email is available for medium and high churn risk'
+                }
+                onClick={sendStakeholderEmail}
+              >
+                {emailing ? 'Drafting email…' : 'Send an email to stakeholder'}
+              </button>
             </div>
           </div>
 
