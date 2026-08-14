@@ -37,7 +37,7 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import qa_v8
 
@@ -68,6 +68,9 @@ MAX_BULK_WORKERS = 20
 MAX_BATCH_ZIP_BYTES = MAX_UPLOAD_BYTES * MAX_BULK_FILES
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mpeg", ".mpga", ".aac"}
 _db_lock = threading.Lock()
+_BATCH_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+_batches_lock = threading.Lock()
+_batches: dict[str, dict] = {}
 
 PYAI_SANDBOX_MINT_URL = "https://api.pyai.com/v1/sandbox/keys"
 ENV_FILE = ".env"
@@ -122,6 +125,7 @@ async def log_http(request: Request, call_next):
 def _conn():
     c = sqlite3.connect(DB_PATH, timeout=30)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA busy_timeout=30000")
     return c
 
 
@@ -283,6 +287,9 @@ def _startup():
         )
 
     transcribe.init_db().close()
+    with sqlite3.connect(DB_PATH, timeout=30) as wal:
+        wal.execute("PRAGMA journal_mode=WAL")
+        wal.execute("PRAGMA busy_timeout=30000")
     with _conn() as c:
         c.execute(
             "CREATE TABLE IF NOT EXISTS audits ("
@@ -1807,45 +1814,73 @@ def upload(file: UploadFile = File(...)):
     return {"call_id": call_id, "filename": _call_filename(call_id)}
 
 
-@app.post("/api/upload-batch")
-def upload_batch(file: UploadFile = File(...)):
-    """
-    One zip of up to MAX_BULK_FILES audio files. Extract to unique paths,
-    transcribe all on PyAI in parallel, then run Claude QA in parallel.
-    """
-    data = file.file.read()
-    if not data:
-        raise HTTPException(status_code=400, detail="The uploaded zip was empty.")
-    if len(data) > MAX_BATCH_ZIP_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"Zip is too large. Maximum is {MAX_BATCH_ZIP_BYTES // (1024 * 1024)} MB.",
-        )
+def _batch_call_row(index: int, filename: str) -> dict:
+    return {
+        "index": index,
+        "filename": filename,
+        "status": "queued",
+        "error": None,
+        "call_id": None,
+        "score": None,
+        "grade": None,
+        "flagged": False,
+        "deduped": False,
+    }
 
-    batch_id = uuid.uuid4().hex
-    batch_dir = os.path.join(AUDIO_DIR, "batches", batch_id)
-    os.makedirs(batch_dir, exist_ok=True)
-    zip_path = os.path.join(batch_dir, "batch.zip")
-    with open(zip_path, "wb") as f:
-        f.write(data)
 
+def _batch_public(batch_id: str) -> dict | None:
+    with _batches_lock:
+        row = _batches.get(batch_id)
+        if not row:
+            return None
+        return {
+            "batch_id": batch_id,
+            "status": row["status"],
+            "count": row["count"],
+            "calls": [dict(item) for item in row["calls"]],
+        }
+
+
+def _batch_update_call(batch_id: str, index: int, **fields) -> None:
+    with _batches_lock:
+        row = _batches.get(batch_id)
+        if not row or index < 0 or index >= len(row["calls"]):
+            return
+        row["calls"][index].update(fields)
+
+
+def _mark_batch_done(batch_id: str, leftover_error: str | None = None) -> None:
+    with _batches_lock:
+        row = _batches.get(batch_id)
+        if not row:
+            return
+        if leftover_error:
+            for item in row["calls"]:
+                if item.get("status") not in ("ok", "error"):
+                    item["status"] = "error"
+                    item["error"] = leftover_error
+        row["status"] = "done"
+
+
+def _run_batch(batch_id: str, extracted: list, batch_dir: str) -> None:
+    """Transcribe then audit in the background so the upload HTTP request can return."""
     started = time.perf_counter()
     try:
-        extracted = _extract_batch_zip(zip_path, batch_dir)
-        applog.event(
-            log, "batch_received",
-            count=len(extracted),
-            zip_bytes=len(data),
-            batch_id=batch_id,
-        )
-        log.info("batch %s: %d file(s), parallel transcribe then parallel QA", batch_id, len(extracted))
-
         ingest_rows = [None] * len(extracted)
 
         def ingest_one(item):
+            _batch_update_call(batch_id, item["index"], status="transcribing")
             try:
                 call_id, deduped = _ingest_audio_file(item["path"], item["filename"])
                 _store_playback(item["path"], call_id)
+                _batch_update_call(
+                    batch_id,
+                    item["index"],
+                    status="auditing",
+                    call_id=call_id,
+                    deduped=deduped,
+                    error=None,
+                )
                 return {
                     "index": item["index"],
                     "filename": item["filename"],
@@ -1859,6 +1894,13 @@ def upload_batch(file: UploadFile = File(...)):
                     log, "transcription_failure", level=logging.ERROR,
                     filename=item["filename"],
                     error=msg,
+                )
+                _batch_update_call(
+                    batch_id,
+                    item["index"],
+                    status="error",
+                    error=msg,
+                    call_id=None,
                 )
                 return {
                     "index": item["index"],
@@ -1878,80 +1920,125 @@ def upload_batch(file: UploadFile = File(...)):
         to_audit = [r for r in ingest_rows if r and r.get("call_id") and not r.get("error")]
 
         def audit_one(row):
+            _batch_update_call(batch_id, row["index"], status="auditing", call_id=row.get("call_id"))
             try:
                 audit, _rh = _load_or_compute_audit(row["call_id"], refresh=False)
-                return {
-                    **row,
-                    "status": "ok",
-                    "score": audit.get("score"),
-                    "grade": audit.get("grade"),
-                    "flagged": bool(audit.get("flagged")),
-                }
+                _batch_update_call(
+                    batch_id,
+                    row["index"],
+                    status="ok",
+                    score=audit.get("score"),
+                    grade=audit.get("grade"),
+                    flagged=bool(audit.get("flagged")),
+                    error=None,
+                )
             except (Exception, SystemExit) as e:  # noqa: BLE001
-                return {
-                    **row,
-                    "status": "error",
-                    "error": f"Transcribed but audit failed: {e}",
-                    "score": None,
-                    "grade": None,
-                    "flagged": False,
-                }
+                _batch_update_call(
+                    batch_id,
+                    row["index"],
+                    status="error",
+                    error=f"Transcribed but audit failed: {e}",
+                    score=None,
+                    grade=None,
+                    flagged=False,
+                )
 
-        audited = {}
         if to_audit:
             with ThreadPoolExecutor(max_workers=min(MAX_BULK_WORKERS, len(to_audit))) as pool:
                 futs = [pool.submit(audit_one, row) for row in to_audit]
                 for fut in as_completed(futs):
-                    row = fut.result()
-                    audited[row["index"]] = row
+                    fut.result()
 
-        calls = []
-        for row in ingest_rows:
-            if not row:
-                continue
-            if row.get("error") and not row.get("call_id"):
-                calls.append({
-                    "filename": row["filename"],
-                    "status": "error",
-                    "error": row["error"],
-                    "call_id": None,
-                    "score": None,
-                    "grade": None,
-                    "flagged": False,
-                    "deduped": False,
-                })
-            elif row["index"] in audited:
-                out = audited[row["index"]]
-                calls.append({
-                    "filename": out["filename"],
-                    "status": out.get("status") or "ok",
-                    "error": out.get("error"),
-                    "call_id": out.get("call_id"),
-                    "score": out.get("score"),
-                    "grade": out.get("grade"),
-                    "flagged": bool(out.get("flagged")),
-                    "deduped": bool(out.get("deduped")),
-                })
-            else:
-                calls.append({
-                    "filename": row["filename"],
-                    "status": "ok",
-                    "error": None,
-                    "call_id": row.get("call_id"),
-                    "score": None,
-                    "grade": None,
-                    "flagged": False,
-                    "deduped": bool(row.get("deduped")),
-                })
-
+        _mark_batch_done(batch_id)
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         applog.event(
             log, "batch_completed",
             batch_id=batch_id,
-            count=len(calls),
+            count=len(extracted),
             duration_ms=duration_ms,
         )
-        log.info("batch %s done in %.0f ms (%d call(s))", batch_id, duration_ms, len(calls))
-        return {"count": len(calls), "calls": calls}
+        log.info("batch %s done in %.0f ms (%d call(s))", batch_id, duration_ms, len(extracted))
+    except (Exception, SystemExit) as e:  # noqa: BLE001
+        msg = str(e)
+        applog.event(
+            log, "batch_failed", level=logging.ERROR,
+            batch_id=batch_id,
+            error=msg,
+        )
+        log.error("batch %s failed: %s", batch_id, msg)
+        _mark_batch_done(batch_id, leftover_error=msg)
     finally:
         shutil.rmtree(batch_dir, ignore_errors=True)
+
+
+@app.get("/api/batches/{batch_id}")
+def get_batch(batch_id: str):
+    if not _BATCH_ID_RE.match(batch_id or ""):
+        raise HTTPException(status_code=404, detail="Unknown batch.")
+    public = _batch_public(batch_id)
+    if not public:
+        raise HTTPException(status_code=404, detail="Unknown batch.")
+    return public
+
+
+@app.post("/api/upload-batch")
+def upload_batch(file: UploadFile = File(...)):
+    """
+    Accept a zip of up to MAX_BULK_FILES audio files, then transcribe and score
+    in the background. Returns 202 + batch_id immediately after extract so
+    proxies and tunnels do not time out waiting for PyAI/Claude.
+    """
+    data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="The uploaded zip was empty.")
+    if len(data) > MAX_BATCH_ZIP_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Zip is too large. Maximum is {MAX_BATCH_ZIP_BYTES // (1024 * 1024)} MB.",
+        )
+
+    batch_id = uuid.uuid4().hex
+    batch_dir = os.path.join(AUDIO_DIR, "batches", batch_id)
+    os.makedirs(batch_dir, exist_ok=True)
+    zip_path = os.path.join(batch_dir, "batch.zip")
+    with open(zip_path, "wb") as f:
+        f.write(data)
+
+    try:
+        extracted = _extract_batch_zip(zip_path, batch_dir)
+    except HTTPException:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+        raise
+
+    with _batches_lock:
+        _batches[batch_id] = {
+            "status": "processing",
+            "count": len(extracted),
+            "calls": [_batch_call_row(item["index"], item["filename"]) for item in extracted],
+        }
+    applog.event(
+        log, "batch_received",
+        count=len(extracted),
+        zip_bytes=len(data),
+        batch_id=batch_id,
+    )
+    log.info(
+        "batch %s accepted: %d file(s); transcribe + QA continue in background",
+        batch_id, len(extracted),
+    )
+    threading.Thread(
+        target=_run_batch,
+        args=(batch_id, extracted, batch_dir),
+        name=f"batch-{batch_id[:8]}",
+        daemon=True,
+    ).start()
+    public = _batch_public(batch_id) or {
+        "batch_id": batch_id,
+        "status": "processing",
+        "count": len(extracted),
+        "calls": [],
+    }
+    return JSONResponse(status_code=202, content=public)

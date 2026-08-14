@@ -136,18 +136,70 @@ async function fetchAuditJson(id: number): Promise<Record<string, unknown>> {
   return r.json() as Promise<Record<string, unknown>>
 }
 
-async function uploadBatchZip(files: File[]): Promise<
-  Array<{ call_id?: number; score?: number; status?: string; error?: string }>
-> {
+type BatchCallRow = {
+  call_id?: number | null
+  score?: number | null
+  status?: string
+  error?: string | null
+  filename?: string
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+async function fetchBatchStatus(batchId: string): Promise<{
+  status: string
+  calls: BatchCallRow[]
+}> {
+  const r = await fetch(`${API}/api/batches/${encodeURIComponent(batchId)}`)
+  if (!r.ok) throw new Error(await readError(r, 'Could not read batch status.'))
+  return r.json() as Promise<{ status: string; calls: BatchCallRow[] }>
+}
+
+async function uploadBatchZip(
+  files: File[],
+  onProgress?: (calls: BatchCallRow[]) => void,
+): Promise<BatchCallRow[]> {
   const blob = await zipAudioFiles(files)
   const fd = new FormData()
   fd.append('file', blob, 'batch.zip')
-  const r = await fetch(`${API}/api/upload-batch`, { method: 'POST', body: fd })
+  let r: Response
+  try {
+    r = await fetch(`${API}/api/upload-batch`, { method: 'POST', body: fd })
+  } catch {
+    throw new Error(
+      'Batch upload was interrupted (network or tunnel timeout). Check Agents Pulse — some calls may still be processing.',
+    )
+  }
   if (!r.ok) throw new Error(await readError(r, 'Batch upload failed'))
   const data = (await r.json()) as {
-    calls?: Array<{ call_id?: number; score?: number; status?: string; error?: string }>
+    batch_id?: string
+    status?: string
+    calls?: BatchCallRow[]
   }
-  return data.calls || []
+  if (Array.isArray(data.calls) && data.status && data.status !== 'processing') {
+    onProgress?.(data.calls)
+    return data.calls
+  }
+  const batchId = data.batch_id
+  if (!batchId) throw new Error('Batch upload did not return a batch id.')
+  onProgress?.(data.calls || [])
+  for (;;) {
+    await sleep(1500)
+    let snap: { status: string; calls: BatchCallRow[] }
+    try {
+      snap = await fetchBatchStatus(batchId)
+    } catch {
+      throw new Error(
+        'Lost connection while the batch was processing. Check Agents Pulse — calls may still appear as they finish.',
+      )
+    }
+    onProgress?.(snap.calls || [])
+    if (snap.status === 'done' || snap.status === 'error') {
+      return snap.calls || []
+    }
+  }
 }
 
 export function AuditProvider({ children }: { children: ReactNode }) {
@@ -171,11 +223,15 @@ export function AuditProvider({ children }: { children: ReactNode }) {
   }, [])
 
   const refreshCalls = useCallback(async () => {
-    const r = await fetch(`${API}/api/calls`)
-    if (!r.ok) return [] as CallListItem[]
-    const data = (await r.json()) as CallListItem[]
-    setCalls(data)
-    return data
+    try {
+      const r = await fetch(`${API}/api/calls`)
+      if (!r.ok) return [] as CallListItem[]
+      const data = (await r.json()) as CallListItem[]
+      setCalls(data)
+      return data
+    } catch {
+      return [] as CallListItem[]
+    }
   }, [])
 
   useEffect(() => {
@@ -341,26 +397,46 @@ export function AuditProvider({ children }: { children: ReactNode }) {
             lastOkId = callId
             lastAudit = auditJson
           } else if (ready.length >= 2) {
-            ready.forEach(({ job }) => patchJob(job.key, { status: 'auditing' }))
-            const rows = await uploadBatchZip(ready.map((r) => r.file))
-            ready.forEach((item, i) => {
-              const row = rows[i]
-              if (!row || row.status === 'error' || row.call_id == null) {
-                patchJob(item.job.key, {
-                  status: 'failed',
-                  error: (row && row.error) || 'Import failed',
-                  callId: row && row.call_id != null ? row.call_id : null,
-                })
-                return
-              }
-              patchJob(item.job.key, {
-                status: 'done',
-                callId: row.call_id,
-                score: row.score ?? null,
-                error: null,
+            ready.forEach(({ job }) => patchJob(job.key, { status: 'uploading' }))
+            const applyBatchRows = (rows: BatchCallRow[]) => {
+              ready.forEach((item, i) => {
+                const row = rows[i]
+                if (!row) return
+                if (row.status === 'ok' && row.call_id != null) {
+                  patchJob(item.job.key, {
+                    status: 'done',
+                    callId: row.call_id,
+                    score: row.score ?? null,
+                    error: null,
+                  })
+                  lastOkId = row.call_id
+                  return
+                }
+                if (row.status === 'error') {
+                  patchJob(item.job.key, {
+                    status: 'failed',
+                    error: row.error || 'Import failed',
+                    callId: row.call_id != null ? row.call_id : null,
+                  })
+                  return
+                }
+                if (row.status === 'auditing') {
+                  patchJob(item.job.key, {
+                    status: 'auditing',
+                    callId: row.call_id != null ? row.call_id : null,
+                  })
+                  return
+                }
+                if (row.status === 'transcribing') {
+                  patchJob(item.job.key, { status: 'uploading' })
+                }
               })
-              lastOkId = row.call_id
-            })
+            }
+            const rows = await uploadBatchZip(
+              ready.map((entry) => entry.file),
+              applyBatchRows,
+            )
+            applyBatchRows(rows)
           }
         } catch (e) {
           const msg = e instanceof Error ? e.message : 'Import failed'
