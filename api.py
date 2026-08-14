@@ -64,7 +64,7 @@ DB_PATH = qa.DB_PATH
 AUDIO_DIR = "audio"
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_BULK_FILES = 100
-MAX_BULK_WORKERS = 20
+MAX_BULK_WORKERS = 6
 MAX_BATCH_ZIP_BYTES = MAX_UPLOAD_BYTES * MAX_BULK_FILES
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".webm", ".mpeg", ".mpga", ".aac"}
 _db_lock = threading.Lock()
@@ -1596,8 +1596,7 @@ def _ingest_audio_file(src_path: str, source_name: str) -> tuple[int, bool]:
             upload_path = src_path
         else:
             upload_path = transcribe.make_hear_copy(src_path, hear_tmp) or src_path
-        job_id = transcribe.submit_job_file(upload_path, call_id=pyai_id)
-        result = transcribe.poll_job(job_id)
+        job_id, result = transcribe.run_hear_job(upload_path, call_id=pyai_id)
         with _db_lock:
             conn = sqlite3.connect(DB_PATH, timeout=30)
             try:
