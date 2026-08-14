@@ -229,6 +229,11 @@
   color: var(--teal);
 }
 
+.call-picker-chip.is-churn-none {
+  background: rgba(148, 163, 184, 0.18);
+  color: var(--ink-soft);
+}
+
 .call-context-actions {
   display: flex;
   flex-wrap: wrap;
