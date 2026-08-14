@@ -106,6 +106,14 @@ export function ChurnRisk() {
             </div>
           </div>
 
+          <section className="churn-reason-box" aria-label="Why this call was flagged">
+            <p className="churn-reason-kicker">Why this was flagged</p>
+            <p className="churn-reason-body">
+              {capFirst(churn.reasoning) ||
+                'No churn reasoning was recorded for this call.'}
+            </p>
+          </section>
+
           <div className="kpi-strip">
             <KpiCard
               label="Rating"

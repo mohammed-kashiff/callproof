@@ -107,7 +107,7 @@ export function emptyReport(): AuditReport {
     auditMode: '',
     audioUrl: null,
     criteria: [],
-    churn: { level: 'none', quote: '', timestamp: 0 },
+    churn: { level: 'none', quote: '', timestamp: 0, reasoning: '' },
     feedback: { aboutAgent: [], aboutProduct: [], status: 'skipped' },
     summary: { headline: '', narrative: '', actionItems: [] },
     transcript: [],
