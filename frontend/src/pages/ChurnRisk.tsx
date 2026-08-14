@@ -88,6 +88,7 @@ export function ChurnRisk() {
         value={report.numericCallId}
         disabled={running || switching}
         onChange={onPickCall}
+        chip="churn"
       />
     ) : null
 

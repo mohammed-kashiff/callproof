@@ -8,6 +8,8 @@ interface CallPickerProps {
   disabled?: boolean
   onChange: (id: number) => void
   placeholder?: string
+  /** Score by default. Churn Risk shows the rating and sorts high → low. */
+  chip?: 'score' | 'churn'
 }
 
 function shortName(name: string, max = 22) {
@@ -23,21 +25,64 @@ function scoreTone(score: number | null): 'good' | 'mid' | 'low' | 'none' {
   return 'low'
 }
 
+const CHURN_SORT: Record<string, number> = {
+  high: 0,
+  medium: 1,
+  low: 2,
+  none: 3,
+}
+
+function churnRank(risk: string | null | undefined): number {
+  return CHURN_SORT[String(risk || '').toLowerCase()] ?? 9
+}
+
+function chipFor(
+  call: CallListItem,
+  mode: 'score' | 'churn',
+): { text: string; className: string } | null {
+  if (mode === 'churn') {
+    const risk = String(call.churn_risk || '').toLowerCase()
+    if (!risk) return null
+    const tone =
+      risk === 'high' || risk === 'medium' || risk === 'low' ? risk : 'none'
+    return {
+      text: capFirst(risk),
+      className: `call-picker-chip is-label is-churn-${tone}`,
+    }
+  }
+  if (call.score == null) return null
+  return {
+    text: String(call.score),
+    className: `call-picker-chip is-${scoreTone(call.score)}`,
+  }
+}
+
 export function CallPicker({
   calls,
   value,
   disabled = false,
   onChange,
   placeholder = 'Select a call…',
+  chip = 'score',
 }: CallPickerProps) {
   const uid = useId()
   const rootRef = useRef<HTMLDivElement>(null)
   const [open, setOpen] = useState(false)
 
+  const ordered = useMemo(() => {
+    if (chip !== 'churn') return calls
+    return [...calls].sort((a, b) => {
+      const rank = churnRank(a.churn_risk) - churnRank(b.churn_risk)
+      if (rank !== 0) return rank
+      return b.id - a.id
+    })
+  }, [calls, chip])
+
   const selected = useMemo(
-    () => calls.find((c) => c.id === value) ?? null,
-    [calls, value],
+    () => ordered.find((c) => c.id === value) ?? null,
+    [ordered, value],
   )
+  const selectedChip = selected ? chipFor(selected, chip) : null
 
   useEffect(() => {
     if (!open) return
@@ -78,10 +123,8 @@ export function CallPicker({
         <span className="call-picker-trigger-text" title={selected?.filename || placeholder}>
           {triggerLabel}
         </span>
-        {selected?.score != null && (
-          <span className={`call-picker-chip is-${scoreTone(selected.score)}`}>
-            {selected.score}
-          </span>
+        {selectedChip && (
+          <span className={selectedChip.className}>{selectedChip.text}</span>
         )}
         <span className="call-picker-caret" aria-hidden="true">
           ▾
@@ -94,9 +137,9 @@ export function CallPicker({
           role="listbox"
           aria-labelledby={`${uid}-label`}
         >
-          {calls.map((c) => {
+          {ordered.map((c) => {
             const active = c.id === value
-            const tone = scoreTone(c.score)
+            const rowChip = chipFor(c, chip)
             return (
               <li key={c.id} role="presentation">
                 <button
@@ -119,8 +162,8 @@ export function CallPicker({
                   </span>
                   <span className="call-picker-option-meta">
                     {c.audio_seconds != null ? formatTime(c.audio_seconds) : '—'}
-                    {c.score != null && (
-                      <span className={`call-picker-chip is-${tone}`}>{c.score}</span>
+                    {rowChip && (
+                      <span className={rowChip.className}>{rowChip.text}</span>
                     )}
                   </span>
                 </button>

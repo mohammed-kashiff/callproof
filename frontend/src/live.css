@@ -208,6 +208,27 @@
   color: #f87171;
 }
 
+.call-picker-chip.is-label {
+  min-width: 0;
+  padding: 0.08rem 0.4rem;
+  text-transform: capitalize;
+}
+
+.call-picker-chip.is-churn-high {
+  background: rgba(239, 68, 68, 0.16);
+  color: #f87171;
+}
+
+.call-picker-chip.is-churn-medium {
+  background: rgba(217, 119, 6, 0.18);
+  color: #f59e0b;
+}
+
+.call-picker-chip.is-churn-low {
+  background: rgba(20, 184, 166, 0.18);
+  color: var(--teal);
+}
+
 .call-context-actions {
   display: flex;
   flex-wrap: wrap;
