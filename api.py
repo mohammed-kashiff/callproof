@@ -79,8 +79,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "http://[::1]:5173",
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+        "http://[::1]:5174",
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -563,6 +565,23 @@ def _flag_reason_text(audit: dict) -> str:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/api/health")
+def health():
+    """Liveness check. Reports whether keys are set — never the key values."""
+    pyai_key = (
+        transcribe.PYAI_API_KEY
+        or os.environ.get("PYAI_API_KEY")
+        or ""
+    ).strip()
+    anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    return {
+        "ok": True,
+        "service": "callproof",
+        "pyai_configured": bool(pyai_key),
+        "anthropic_configured": bool(anthropic_key),
+    }
+
+
 @app.get("/api/pyai/status")
 def pyai_status():
     """
