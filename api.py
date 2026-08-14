@@ -794,6 +794,7 @@ def list_calls():
             "grade": None,
             "flagged": False,
             "review_solved": False,
+            "churn_risk": "",
             "audited_at": r["audited_at"],
         }
         if r["audit_json"]:
@@ -805,6 +806,9 @@ def list_calls():
                 item["grade"] = cached.get("grade")
                 item["flagged"] = _audit_is_flagged(cached)
                 item["review_solved"] = bool(cached.get("review_solved"))
+                churn = cached.get("churn") or {}
+                if isinstance(churn, dict):
+                    item["churn_risk"] = str(churn.get("risk") or "").strip().lower()
             except (TypeError, json.JSONDecodeError):
                 item["has_audit"] = True
         item["cost"] = cost_estimate.estimate_call_cost(

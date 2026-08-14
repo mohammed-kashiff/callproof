@@ -16,6 +16,12 @@ const LEVELS: { level: ChurnLevel; label: string; hint: string }[] = [
   { level: 'high', label: 'High', hint: 'Imminent cancel / escalate language' },
 ]
 
+const MARKED_CHURN = new Set<ChurnLevel>(['low', 'medium', 'high'])
+
+function isMarkedChurnRisk(risk: string | null | undefined): boolean {
+  return MARKED_CHURN.has(String(risk || '').toLowerCase() as ChurnLevel)
+}
+
 export function ChurnRisk() {
   const navigate = useNavigate()
   const { report, showReport, calls, selectCall, running, onSeek } = useAudit()
@@ -28,11 +34,11 @@ export function ChurnRisk() {
   const callIdLabel =
     report.numericCallId != null ? `Call #${report.numericCallId}` : report.callId || ''
 
-  const auditedCalls = useMemo(
-    () =>
-      calls.filter((c) => c.has_audit || c.status === 'completed' || !c.status),
+  const churnRiskCalls = useMemo(
+    () => calls.filter((c) => isMarkedChurnRisk(c.churn_risk)),
     [calls],
   )
+  const viewingChurn = showReport && isMarkedChurnRisk(churn.level)
 
   const onPickCall = (id: number) => {
     if (id === report.numericCallId) return
@@ -46,9 +52,9 @@ export function ChurnRisk() {
   }
 
   const callPicker =
-    auditedCalls.length > 0 ? (
+    churnRiskCalls.length > 0 ? (
       <CallPicker
-        calls={auditedCalls}
+        calls={churnRiskCalls}
         value={report.numericCallId}
         disabled={running || switching}
         onChange={onPickCall}
@@ -62,7 +68,7 @@ export function ChurnRisk() {
           <p className="crumb">Loop / Retention</p>
           <h1>Churn Risk</h1>
         </div>
-        {!showReport ? callPicker : null}
+        {!viewingChurn ? callPicker : null}
       </header>
 
       {error && (
@@ -71,20 +77,20 @@ export function ChurnRisk() {
         </p>
       )}
 
-      {!showReport && (
+      {!viewingChurn && (
         <div className="empty-card is-pulse">
           <SketchWallpaper variant="churn" />
           <ChurnCue />
           <p className="empty-title">No churn language yet</p>
           <p className="empty-copy">
-            {auditedCalls.length
+            {churnRiskCalls.length
               ? 'Pick a call above to score retention risk.'
               : 'Ingest a recording to score retention risk before renewal.'}
           </p>
         </div>
       )}
 
-      {showReport && (
+      {viewingChurn && (
         <>
           <div className="call-context-banner" role="status">
             <div className="call-context-copy">
