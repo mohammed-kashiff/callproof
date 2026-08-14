@@ -16,12 +16,16 @@ export default defineConfig({
     host: '::',
     port: 5173,
     strictPort: true,
+    // Cursor / cloud previews send a forwarded Host header. Vite 8 blocks
+    // unknown hosts with 403 "Blocked request. This host is not allowed."
+    allowedHosts: true,
     proxy: apiProxy,
   },
   preview: {
     host: '::',
     port: 5173,
     strictPort: true,
+    allowedHosts: true,
     proxy: apiProxy,
   },
   optimizeDeps: {
