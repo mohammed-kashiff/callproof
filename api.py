@@ -563,6 +563,17 @@ def _flag_reason_text(audit: dict) -> str:
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/api/health")
+def health():
+    """Liveness check. Reports whether keys are set — never the key values."""
+    return {
+        "ok": True,
+        "service": "callproof",
+        "pyai_configured": bool((os.environ.get("PYAI_API_KEY") or "").strip()),
+        "anthropic_configured": bool((os.environ.get("ANTHROPIC_API_KEY") or "").strip()),
+    }
+
+
 @app.get("/api/pyai/status")
 def pyai_status():
     """
